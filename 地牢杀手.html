@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>霓虹骰子地牢 - 终极积分版</title>
+    <style>
+        body {
+            margin: 0; padding: 0;
+            background-color: #0b0c10; color: #c5c6c7;
+            font-family: 'Courier New', Courier, monospace;
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            height: 100vh; overflow: hidden;
+            user-select: none;
+        }
+        #game-container { position: relative; }
+        canvas {
+            background-color: #12141a;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+            border: 2px solid #1f2833; border-radius: 10px;
+        }
+        
+        /* UI 布局调整 */
+        .ui-row {
+            width: 500px; display: flex; justify-content: space-between;
+            font-size: 18px; text-shadow: 0 0 5px currentColor;
+            margin-bottom: 8px; font-weight: bold;
+        }
+        .hp { color: #ff003c; } .steps { color: #66fcf1; }
+        .score { color: #ffeb3b; text-shadow: 0 0 8px #ffeb3b; }
+        
+        .mode-atk { color: #ff003c; text-shadow: 0 0 8px #ff003c; }
+        .mode-def { color: #45a29e; text-shadow: 0 0 8px #45a29e; }
+        
+        #controls { margin-top: 15px; text-align: center; }
+        button {
+            background-color: transparent; color: #66fcf1;
+            border: 2px solid #66fcf1; padding: 10px 30px;
+            font-size: 20px; font-family: inherit; cursor: pointer;
+            border-radius: 5px; box-shadow: 0 0 10px #66fcf1 inset, 0 0 10px #66fcf1;
+            transition: 0.2s; font-weight: bold; text-transform: uppercase;
+        }
+        button:hover:not(:disabled) { background-color: #66fcf1; color: #0b0c10; }
+        button:disabled { border-color: #45a29e; color: #45a29e; box-shadow: none; cursor: not-allowed; }
+        #flash-overlay {
+            position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+            pointer-events: none; opacity: 0; transition: opacity 0.1s; border-radius: 10px;
+        }
+        .instructions { margin-top: 10px; font-size: 14px; color: #888; text-align: center; line-height: 1.5; }
+        
+        /* 全屏遮罩层 (启动/死亡) */
+        .overlay-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(11, 12, 16, 0.95); display: flex;
+            flex-direction: column; justify-content: center; align-items: center;
+            z-index: 100; backdrop-filter: blur(5px);
+        }
+        #game-over-screen { display: none; } /* 默认隐藏死亡界面 */
+        
+        .btn-red { border-color: #ff003c; color: #ff003c; box-shadow: 0 0 15px #ff003c inset, 0 0 15px #ff003c; }
+        .btn-red:hover { background-color: #ff003c; color: #000; }
+    </style>
+</head>
+<body>
+
+    <!-- 启动界面 -->
+    <div id="start-screen" class="overlay-screen">
+        <h1 style="color: #66fcf1; text-shadow: 0 0 10px #66fcf1;">霓虹骰子地牢</h1>
+        <p style="color: #888; margin-bottom: 30px;">[ 方向键移动 | 空格键掷骰 ]</p>
+        <button id="start-btn" class="btn-red">⚡ 启动系统 ⚡</button>
+    </div>
+
+    <!-- 死亡结算界面 -->
+    <div id="game-over-screen" class="overlay-screen">
+        <h1 style="color: #ff003c; text-shadow: 0 0 15px #ff003c; font-size: 40px; margin-bottom: 10px;">SYSTEM FAILURE</h1>
+        <h2 style="color: #ffeb3b; text-shadow: 0 0 10px #ffeb3b; margin-bottom: 40px;">最终分数: <span id="final-score">0</span></h2>
+        <button id="restart-btn" class="btn-red">🔄 重新启动</button>
+    </div>
+
+    <!-- 顶部状态栏 -->
+    <div id="ui-top" class="ui-row">
+        <div class="hp">生命: <span id="hp-val">❤️❤️❤️</span></div>
+        <div class="score">分数: <span id="score-val">0</span></div>
+        <div class="steps">步数: <span id="steps-val">0</span></div>
+    </div>
+    <!-- 模式提示栏 -->
+    <div id="mode-val" class="ui-row" style="justify-content: center; font-size: 16px;">等待掷骰</div>
+
+    <div id="game-container">
+        <canvas id="gameCanvas" width="500" height="500"></canvas>
+        <div id="flash-overlay"></div>
+    </div>
+
+    <div id="controls">
+        <button id="rollBtn" disabled>🎲 掷骰子 (Space)</button>
+    </div>
+    
+    <div class="instructions">
+        <strong>[攻击-红]</strong> 点数 <strong>≥</strong> 怪物可击杀，数字越大得分越高。<br>
+        <strong>[防御-蓝]</strong> 撞怪绝对免疫，且可<strong>无伤拆除陷阱</strong>并得分。
+    </div>
+
+<script>
+/* =========================================
+ * 1. Web Audio API 纯代码合成声音引擎
+ * ========================================= */
+const AudioEngine = (function() {
+    let ctx;
+    let masterGain;
+    let bgmInterval;
+    let isPlayingBGM = false;
+
+    function playTone(freq, type, duration, vol=0.1, slideFreq=null) {
+        if(!ctx) return;
+        let t = ctx.currentTime;
+        let osc = ctx.createOscillator(); let gain = ctx.createGain();
+        osc.type = type; osc.frequency.setValueAtTime(freq, t);
+        if(slideFreq) osc.frequency.exponentialRampToValueAtTime(slideFreq, t + duration);
+        gain.gain.setValueAtTime(vol, t); gain.gain.exponentialRampToValueAtTime(0.01, t + duration);
+        osc.connect(gain); gain.connect(masterGain);
+        osc.start(t); osc.stop(t + duration);
+    }
+
+    function playNoise(duration, vol=0.2) {
+        if(!ctx) return;
+        let t = ctx.currentTime;
+        let bufferSize = ctx.sampleRate * duration; let buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+        let data = buffer.getChannelData(0);
+        for(let i=0; i<bufferSize; i++) data[i] = Math.random() * 2 - 1;
+        let noise = ctx.createBufferSource(); noise.buffer = buffer;
+        let filter = ctx.createBiquadFilter(); filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(1000, t); filter.frequency.linearRampToValueAtTime(100, t + duration);
+        let gain = ctx.createGain(); gain.gain.setValueAtTime(vol, t); gain.gain.exponentialRampToValueAtTime(0.01, t + duration);
+        noise.connect(filter); filter.connect(gain); gain.connect(masterGain);
+        noise.start(t);
+    }
+
+    return {
+        init: function() {
+            window.AudioContext = window.AudioContext || window.webkitAudioContext;
+            ctx = new AudioContext(); masterGain = ctx.createGain();
+            masterGain.gain.value = 0.3; masterGain.connect(ctx.destination);
+        },
+        
+        sfxRoll: () => playTone(Math.random()*400+400, 'square', 0.05, 0.05), 
+        sfxRollEnd: () => playTone(1200, 'sine', 0.3, 0.1), 
+        sfxAtkMode: () => playTone(150, 'sawtooth', 0.5, 0.15, 600), 
+        sfxDefMode: () => playTone(800, 'triangle', 0.4, 0.15, 300), 
+        sfxMove: () => playTone(600, 'square', 0.1, 0.05, 300), 
+        sfxDefuse: () => playTone(1200, 'sine', 0.2, 0.2, 2400), // 拆除陷阱音效 (骇入声)
+        sfxChest: () => {
+            if(!ctx) return;
+            let t = ctx.currentTime;
+            [523.25, 659.25, 783.99, 1046.50].forEach((freq, i) => {
+                let osc = ctx.createOscillator(); let gain = ctx.createGain();
+                osc.type = 'square'; osc.frequency.value = freq;
+                gain.gain.setValueAtTime(0.1, t + i*0.1); gain.gain.exponentialRampToValueAtTime(0.01, t + i*0.1 + 0.1);
+                osc.connect(gain); gain.connect(masterGain);
+                osc.start(t + i*0.1); osc.stop(t + i*0.1 + 0.1);
+            });
+        },
+        sfxKill: () => { playNoise(0.2, 0.3); playTone(800, 'sawtooth', 0.3, 0.1, 1600); },
+        sfxBounce: () => playTone(200, 'sine', 0.3, 0.2, 600), 
+        sfxDamage: () => { playNoise(0.4, 0.4); playTone(100, 'sawtooth', 0.4, 0.3, 50); playTone(105, 'sawtooth', 0.4, 0.3, 55); },
+        sfxLevelUp: () => { playTone(100, 'sine', 1.0, 0.4, 20); setTimeout(() => playTone(880, 'square', 0.5, 0.1, 1760), 300); },
+
+        startBGM: function() {
+            if(!ctx || isPlayingBGM) return;
+            isPlayingBGM = true;
+            let delayNode = ctx.createDelay(); delayNode.delayTime.value = 0.3; 
+            let delayGain = ctx.createGain(); delayGain.gain.value = 0.4; 
+            delayNode.connect(delayGain); delayGain.connect(delayNode); delayNode.connect(masterGain);
+
+            let step = 0;
+            const melody = [
+                261.63, 0, 311.13, 0, 392.00, 0, 349.23, 311.13,
+                293.66, 0, 0, 349.23, 392.00, 0, 0, 0,
+                415.30, 0, 392.00, 0, 349.23, 311.13, 293.66, 0,
+                523.25, 0, 466.16, 392.00, 349.23, 0, 311.13, 293.66
+            ];
+            
+            bgmInterval = setInterval(() => {
+                let t = ctx.currentTime;
+                let bassOsc = ctx.createOscillator(); let bassGain = ctx.createGain(); let filter = ctx.createBiquadFilter();
+                bassOsc.type = 'sawtooth'; bassOsc.frequency.value = 65.41; 
+                filter.type = 'lowpass'; filter.frequency.setValueAtTime(800, t); filter.frequency.exponentialRampToValueAtTime(100, t + 0.15); 
+                bassGain.gain.setValueAtTime(0.2, t); bassGain.gain.exponentialRampToValueAtTime(0.01, t + 0.15);
+                bassOsc.connect(filter); filter.connect(bassGain); bassGain.connect(masterGain);
+                bassOsc.start(t); bassOsc.stop(t + 0.15);
+
+                let note = melody[step % 32];
+                if(note > 0) {
+                    let leadOsc = ctx.createOscillator(); let leadGain = ctx.createGain();
+                    leadOsc.type = 'square'; leadOsc.frequency.value = note;
+                    leadGain.gain.setValueAtTime(0.08, t); leadGain.gain.exponentialRampToValueAtTime(0.01, t + 0.2);
+                    leadOsc.connect(leadGain); leadGain.connect(masterGain); leadGain.connect(delayNode); 
+                    leadOsc.start(t); leadOsc.stop(t + 0.2);
+                }
+                step++;
+            }, 200); 
+        }
+    };
+})();
+
+/* =========================================
+ * 2. 游戏核心逻辑 (视觉与状态)
+ * ========================================= */
+const canvas = document.getElementById('gameCanvas');
+const ctxCanvas = canvas.getContext('2d');
+const gridSize = 50, cols = 10, rows = 10;
+
+// 新增 score 变量
+let state = {
+    hp: 3, maxHp: 3, steps: 0, diceValue: 1, mode: 'none',
+    level: 1, score: 0, skins: ['#00ffff'], currentSkinIdx: 0,
+    isRolling: false, map: [], particles: []
+};
+
+const TYPE = { EMPTY: 0, WALL: 1, MONSTER: 2, CHEST: 3, TRAP: 4, EXIT: 5 };
+let player = { x: 0, y: 0, visualX: 0, visualY: 0, moving: false };
+
+function generateMap() {
+    state.map = Array.from({length: cols}, () => Array(rows).fill(null));
+    player.x = 0; player.y = 0; player.visualX = 0; player.visualY = 0;
+    for(let x=0; x<cols; x++) {
+        for(let y=0; y<rows; y++) {
+            if(x===0 && y===0) { state.map[x][y] = { type: TYPE.EMPTY }; continue; }
+            if(x===cols-1 && y===rows-1) { state.map[x][y] = { type: TYPE.EXIT }; continue; }
+            let rand = Math.random();
+            if(rand < 0.15) state.map[x][y] = { type: TYPE.WALL };
+            else if(rand < 0.3) state.map[x][y] = { type: TYPE.MONSTER, value: Math.floor(Math.random()*6)+1 };
+            else if(rand < 0.35) state.map[x][y] = { type: TYPE.CHEST };
+            else if(rand < 0.45) state.map[x][y] = { type: TYPE.TRAP };
+            else state.map[x][y] = { type: TYPE.EMPTY };
+        }
+    }
+}
+
+function drawDiceFace(x, y, size, value, color, isNeon=true) {
+    ctxCanvas.save(); ctxCanvas.translate(x, y);
+    ctxCanvas.fillStyle = '#1f2833'; ctxCanvas.strokeStyle = color; ctxCanvas.lineWidth = 2;
+    if(isNeon) { ctxCanvas.shadowBlur = 15; ctxCanvas.shadowColor = color; }
+    ctxCanvas.beginPath(); ctxCanvas.roundRect(-size/2, -size/2, size, size, 5);
+    ctxCanvas.fill(); ctxCanvas.stroke();
+    
+    ctxCanvas.fillStyle = color; ctxCanvas.shadowBlur = isNeon ? 10 : 0;
+    const dotR = size * 0.08, offset = size * 0.25;
+    const drawDot = (dx, dy) => { ctxCanvas.beginPath(); ctxCanvas.arc(dx, dy, dotR, 0, Math.PI*2); ctxCanvas.fill(); };
+
+    if([1,3,5].includes(value)) drawDot(0, 0);
+    if(value > 1) { drawDot(-offset, -offset); drawDot(offset, offset); }
+    if(value > 3) { drawDot(-offset, offset); drawDot(offset, -offset); }
+    if(value === 6) { drawDot(-offset, 0); drawDot(offset, 0); }
+    ctxCanvas.restore();
+}
+
+function spawnParticles(x, y, color, count=10) {
+    for(let i=0; i<count; i++) {
+        state.particles.push({
+            x: x + gridSize/2, y: y + gridSize/2,
+            vx: (Math.random()-0.5) * 4, vy: (Math.random()-0.5) * 4,
+            life: 1.0, color: color
+        });
+    }
+}
+
+function updateAndDrawParticles() {
+    for(let i = state.particles.length - 1; i >= 0; i--) {
+        let p = state.particles[i];
+        p.x += p.vx; p.y += p.vy; p.life -= 0.05;
+        if(p.life <= 0) state.particles.splice(i, 1);
+        else {
+            ctxCanvas.globalAlpha = p.life; ctxCanvas.fillStyle = p.color;
+            ctxCanvas.shadowBlur = 10; ctxCanvas.shadowColor = p.color;
+            ctxCanvas.beginPath(); ctxCanvas.arc(p.x, p.y, 3, 0, Math.PI*2); ctxCanvas.fill();
+            ctxCanvas.globalAlpha = 1.0; ctxCanvas.shadowBlur = 0;
+        }
+    }
+}
+
+function screenFlash(color) {
+    const overlay = document.getElementById('flash-overlay');
+    overlay.style.backgroundColor = color;
+    overlay.style.opacity = 0.5;
+    setTimeout(() => overlay.style.opacity = 0, 100);
+}
+
+function draw() {
+    ctxCanvas.clearRect(0, 0, canvas.width, canvas.height);
+    for(let x=0; x<cols; x++) {
+        for(let y=0; y<rows; y++) {
+            let px = x * gridSize, py = y * gridSize;
+            ctxCanvas.strokeStyle = '#1f2833'; ctxCanvas.lineWidth = 1;
+            ctxCanvas.strokeRect(px, py, gridSize, gridSize);
+            
+            let cell = state.map[x][y];
+            if(!cell) continue;
+            let cx = px + gridSize/2, cy = py + gridSize/2;
+
+            if(cell.type === TYPE.WALL) { ctxCanvas.fillStyle = '#111'; ctxCanvas.fillRect(px+2, py+2, gridSize-4, gridSize-4); } 
+            else if(cell.type === TYPE.MONSTER) drawDiceFace(cx, cy, gridSize*0.7, cell.value, '#ff003c', true);
+            else if(cell.type === TYPE.CHEST) {
+                ctxCanvas.fillStyle = '#ffeb3b'; ctxCanvas.shadowBlur = 15; ctxCanvas.shadowColor = '#ffeb3b';
+                ctxCanvas.fillRect(cx-10, cy-10, 20, 20); ctxCanvas.shadowBlur = 0;
+            } else if(cell.type === TYPE.TRAP) {
+                ctxCanvas.fillStyle = '#9c27b0'; ctxCanvas.shadowBlur = 15; ctxCanvas.shadowColor = '#9c27b0';
+                ctxCanvas.beginPath(); ctxCanvas.moveTo(cx, cy-15); ctxCanvas.lineTo(cx+15, cy+15); ctxCanvas.lineTo(cx-15, cy+15);
+                ctxCanvas.fill(); ctxCanvas.shadowBlur = 0;
+            } else if(cell.type === TYPE.EXIT) {
+                ctxCanvas.fillStyle = '#4caf50'; ctxCanvas.shadowBlur = 20; ctxCanvas.shadowColor = '#4caf50';
+                ctxCanvas.beginPath(); ctxCanvas.arc(cx, cy, 15, 0, Math.PI*2); ctxCanvas.fill(); ctxCanvas.shadowBlur = 0;
+            }
+        }
+    }
+
+    updateAndDrawParticles();
+    player.visualX += (player.x * gridSize - player.visualX) * 0.2;
+    player.visualY += (player.y * gridSize - player.visualY) * 0.2;
+    if(Math.abs(player.visualX - player.x*gridSize) < 1 && Math.abs(player.visualY - player.y*gridSize) < 1) {
+        player.moving = false;
+    } else {
+        spawnParticles(player.visualX, player.visualY, state.skins[state.currentSkinIdx], 1);
+    }
+
+    let pColor = state.skins[state.currentSkinIdx];
+    if(state.mode === 'atk') pColor = '#ff003c';
+    if(state.mode === 'def') pColor = '#45a29e';
+    drawDiceFace(player.visualX + gridSize/2, player.visualY + gridSize/2, gridSize*0.8, state.diceValue, pColor, true);
+
+    requestAnimationFrame(draw);
+}
+
+function rollDice() {
+    if(state.steps > 0 || state.isRolling || player.moving) return;
+    state.isRolling = true; document.getElementById('rollBtn').disabled = true;
+    
+    let rolls = 0;
+    let rollInterval = setInterval(() => {
+        state.diceValue = Math.floor(Math.random()*6) + 1;
+        AudioEngine.sfxRoll(); 
+        rolls++;
+        if(rolls > 15) {
+            clearInterval(rollInterval);
+            AudioEngine.sfxRollEnd(); 
+            state.steps = state.diceValue;
+            state.mode = (state.diceValue % 2 === 0) ? 'atk' : 'def';
+            
+            if(state.mode === 'atk') AudioEngine.sfxAtkMode();
+            else AudioEngine.sfxDefMode();
+
+            state.isRolling = false; updateUI();
+        }
+    }, 50);
+}
+
+function movePlayer(dx, dy) {
+    if(state.steps <= 0 || player.moving || state.isRolling) return;
+    let nx = player.x + dx, ny = player.y + dy;
+    if(nx < 0 || nx >= cols || ny < 0 || ny >= rows) return;
+    let target = state.map[nx][ny];
+    if(target.type === TYPE.WALL) return;
+
+    player.moving = true; state.steps--;
+    AudioEngine.sfxMove(); 
+
+    if(target.type === TYPE.MONSTER) {
+        if(state.mode === 'atk') {
+            if(state.diceValue >= target.value) {
+                // 击杀得分：吃掉的数字越大，获得分数越多
+                let gainedScore = target.value * 10;
+                state.score += gainedScore;
+                
+                AudioEngine.sfxKill();
+                screenFlash('#4caf50'); spawnParticles(nx*gridSize, ny*gridSize, '#ff003c', 30);
+                state.map[nx][ny] = { type: TYPE.EMPTY }; player.x = nx; player.y = ny;
+            } else {
+                takeDamage(); state.steps = 0; 
+            }
+        } else if(state.mode === 'def') {
+            AudioEngine.sfxBounce();
+            screenFlash('#45a29e'); spawnParticles(nx*gridSize, ny*gridSize, '#45a29e', 20);
+            state.steps = 0;
+        }
+    } else if(target.type === TYPE.TRAP) {
+        // === 陷阱规则修改 ===
+        if(state.mode === 'def') {
+            // 防御模式：拆除陷阱并得分
+            AudioEngine.sfxDefuse();
+            screenFlash('#9c27b0'); spawnParticles(nx*gridSize, ny*gridSize, '#9c27b0', 20);
+            state.score += 30; // 拆除陷阱加分
+            state.map[nx][ny] = { type: TYPE.EMPTY }; player.x = nx; player.y = ny;
+        } else {
+            // 攻击模式：踩陷阱扣血
+            takeDamage(); state.map[nx][ny] = { type: TYPE.EMPTY }; player.x = nx; player.y = ny;
+        }
+    } else {
+        // 移动到空地或宝箱/出口
+        player.x = nx; player.y = ny;
+        if(target.type === TYPE.CHEST) {
+            AudioEngine.sfxChest(); 
+            state.score += 50; // 宝箱加分
+            const newColors = ['#ff00ff', '#ff8800', '#00ff00', '#ffffff'];
+            state.skins.push(newColors[Math.floor(Math.random()*newColors.length)]);
+            state.currentSkinIdx = state.skins.length - 1;
+            state.map[nx][ny] = { type: TYPE.EMPTY }; screenFlash('#ffeb3b');
+        } else if(target.type === TYPE.EXIT) {
+            AudioEngine.sfxLevelUp(); 
+            state.score += state.level * 100; // 过关奖励倍增
+            state.level++; 
+            state.steps = 0; state.mode = 'none'; generateMap();
+        }
+    }
+    
+    if(state.steps === 0) state.mode = 'none';
+    updateUI();
+}
+
+function triggerGameOver() {
+    document.getElementById('final-score').innerText = state.score;
+    document.getElementById('game-over-screen').style.display = 'flex';
+    document.getElementById('rollBtn').disabled = true;
+}
+
+function takeDamage() {
+    state.hp--;
+    AudioEngine.sfxDamage(); 
+    screenFlash('#ff003c');
+    if(state.hp <= 0) {
+        // 延迟一点弹出结算界面，确保看到最后一次闪烁动画
+        setTimeout(triggerGameOver, 300);
+    }
+}
+
+function updateUI() {
+    document.getElementById('hp-val').innerText = '❤️'.repeat(state.hp) + '🖤'.repeat(state.maxHp - state.hp);
+    document.getElementById('score-val').innerText = state.score;
+    document.getElementById('steps-val').innerText = state.steps;
+    
+    let modeText = document.getElementById('mode-val');
+    if(state.steps === 0) {
+        modeText.innerText = '等待掷骰'; modeText.className = 'ui-row';
+        document.getElementById('rollBtn').disabled = false;
+    } else {
+        if(state.mode === 'atk') {
+            modeText.innerText = '⚔️ 攻击模式 (可吃掉点数 ≤ ' + state.diceValue + ' 的怪物)'; 
+            modeText.className = 'ui-row mode-atk';
+        } else {
+            modeText.innerText = '🛡️ 防御模式 (撞怪弹回 | 可无伤吃陷阱得分)'; 
+            modeText.className = 'ui-row mode-def';
+        }
+    }
+}
+
+// 键盘事件
+window.addEventListener('keydown', (e) => {
+    // 只有在没有遮罩层的时候才能操作
+    let startScreenVisible = document.getElementById('start-screen').style.display !== 'none';
+    let gameOverVisible = document.getElementById('game-over-screen').style.display === 'flex';
+    if(startScreenVisible || gameOverVisible) return;
+    
+    if(e.code === 'Space') { e.preventDefault(); rollDice(); }
+    if(e.code === 'ArrowUp') movePlayer(0, -1);
+    if(e.code === 'ArrowDown') movePlayer(0, 1);
+    if(e.code === 'ArrowLeft') movePlayer(-1, 0);
+    if(e.code === 'ArrowRight') movePlayer(1, 0);
+});
+
+// 按钮点击
+document.getElementById('rollBtn').addEventListener('click', () => {
+    document.getElementById('rollBtn').blur(); rollDice();
+});
+
+document.getElementById('start-btn').addEventListener('click', () => {
+    document.getElementById('start-screen').style.display = 'none';
+    document.getElementById('rollBtn').disabled = false;
+    AudioEngine.init(); AudioEngine.startBGM();
+    generateMap(); updateUI(); draw();
+});
+
+document.getElementById('restart-btn').addEventListener('click', () => {
+    document.getElementById('game-over-screen').style.display = 'none';
+    state.hp = state.maxHp; state.level = 1; state.score = 0; 
+    state.skins = ['#00ffff']; state.currentSkinIdx = 0; 
+    state.steps = 0; state.mode = 'none';
+    generateMap(); updateUI();
+});
+
+</script>
+</body>
+</html>
